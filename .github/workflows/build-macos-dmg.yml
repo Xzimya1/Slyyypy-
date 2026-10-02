@@ -1,75 +1,187 @@
-name: Build SleepGuard macOS DMG
+```yaml
+name: Build Slyyypy macOS
 
 on:
-  workflow_dispatch:
   push:
-    tags:
-      - 'v*'
+    branches:
+      - main
+      - master
+
+  workflow_dispatch:
 
 jobs:
-  build:
-    name: Build DMG (${{ matrix.arch_name }})
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - runner: macos-15
-            arch_name: arm64
-            qt_arch: clang_64
-          - runner: macos-15-intel
-            arch_name: x86_64
-            qt_arch: clang_64
+  build-macos:
+    name: Build macOS DMG
+    runs-on: macos-14
 
-    runs-on: ${{ matrix.runner }}
     env:
-      QT_VERSION: '6.8.3'
+      APP_NAME: Slyyypy
+      BUILD_DIR: build
 
     steps:
+      # ---------------------------------------------------------
+      # 1. Получаем исходный код
+      # ---------------------------------------------------------
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install Qt 6
+      # ---------------------------------------------------------
+      # 2. Устанавливаем Python
+      #
+      # Это исправляет:
+      # error: externally-managed-environment
+      #
+      # install-qt-action больше не будет использовать
+      # системный /usr/local/bin/python3
+      # ---------------------------------------------------------
+      - name: Setup Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+
+      # ---------------------------------------------------------
+      # 3. Устанавливаем Qt
+      # ---------------------------------------------------------
+      - name: Install Qt
         uses: jurplel/install-qt-action@v4
         with:
-          version: ${{ env.QT_VERSION }}
+          version: '6.8.*'
           host: mac
           target: desktop
-          arch: ${{ matrix.qt_arch }}
-          modules: 'qtconnectivity'
           setup-python: false
-          set-env: true
-          cache: true
 
-      - name: Configure
+      # ---------------------------------------------------------
+      # 4. Проверяем окружение
+      # ---------------------------------------------------------
+      - name: Check environment
         run: |
-          cmake -S . -B build \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_OSX_ARCHITECTURES="$(uname -m)"
+          echo "Python:"
+          python3 --version
 
+          echo "CMake:"
+          cmake --version
+
+          echo "Qt:"
+          qmake --version || true
+
+          echo "macOS:"
+          sw_vers
+
+      # ---------------------------------------------------------
+      # 5. Создаём директорию сборки
+      # ---------------------------------------------------------
+      - name: Configure CMake
+        run: |
+          cmake -S . -B "$BUILD_DIR" \
+            -DCMAKE_BUILD_TYPE=Release
+
+      # ---------------------------------------------------------
+      # 6. Компилируем проект
+      # ---------------------------------------------------------
       - name: Build
-        run: cmake --build build --config Release --parallel
-
-      - name: Create app and DMG
         run: |
-          chmod +x deploy_macos.sh
-          ./deploy_macos.sh
+          cmake --build "$BUILD_DIR" \
+            --config Release \
+            --parallel
 
-          test -d build/SleepGuard.app
-          test -f build/SleepGuard.dmg
-          mv build/SleepGuard.dmg "build/SleepGuard-${{ matrix.arch_name }}.dmg"
+      # ---------------------------------------------------------
+      # 7. Показываем результат сборки
+      # ---------------------------------------------------------
+      - name: Find application
+        run: |
+          echo "Searching for .app..."
 
+          find "$BUILD_DIR" \
+            -type d \
+            -name "*.app" \
+            -print
+
+      # ---------------------------------------------------------
+      # 8. Находим .app и сохраняем путь
+      # ---------------------------------------------------------
+      - name: Detect application
+        id: app
+        shell: bash
+        run: |
+          APP_PATH=$(find "$BUILD_DIR" -type d -name "${APP_NAME}.app" -print -quit)
+
+          if [ -z "$APP_PATH" ]; then
+            echo "ERROR: ${APP_NAME}.app was not found!"
+            echo "Available .app files:"
+            find "$BUILD_DIR" -type d -name "*.app" -print
+            exit 1
+          fi
+
+          echo "Found application:"
+          echo "$APP_PATH"
+
+          echo "path=$APP_PATH" >> "$GITHUB_OUTPUT"
+
+      # ---------------------------------------------------------
+      # 9. Копируем Qt frameworks/plugins внутрь .app
+      # ---------------------------------------------------------
+      - name: Deploy Qt
+        run: |
+          APP_PATH="${{ steps.app.outputs.path }}"
+
+          echo "Deploying Qt into:"
+          echo "$APP_PATH"
+
+          macdeployqt "$APP_PATH" \
+            -verbose=2
+
+      # ---------------------------------------------------------
+      # 10. Проверяем .app после macdeployqt
+      # ---------------------------------------------------------
+      - name: Verify application
+        run: |
+          APP_PATH="${{ steps.app.outputs.path }}"
+
+          echo "Application contents:"
+          find "$APP_PATH" -maxdepth 3 -type f | head -100
+
+          echo ""
+          echo "Application information:"
+          file "$APP_PATH/Contents/MacOS/${APP_NAME}" || true
+
+      # ---------------------------------------------------------
+      # 11. Создаём папку для DMG
+      # ---------------------------------------------------------
+      - name: Prepare DMG
+        run: |
+          rm -rf dmg
+          mkdir -p dmg
+
+          cp -R "${{ steps.app.outputs.path }}" "dmg/${APP_NAME}.app"
+
+      # ---------------------------------------------------------
+      # 12. Создаём DMG
+      # ---------------------------------------------------------
+      - name: Create DMG
+        run: |
+          hdiutil create \
+            -volname "${APP_NAME}" \
+            -srcfolder dmg \
+            -ov \
+            -format UDZO \
+            "${APP_NAME}-macOS.dmg"
+
+      # ---------------------------------------------------------
+      # 13. Проверяем DMG
+      # ---------------------------------------------------------
+      - name: Verify DMG
+        run: |
+          ls -lh "${APP_NAME}-macOS.dmg"
+
+          hdiutil imageinfo "${APP_NAME}-macOS.dmg"
+
+      # ---------------------------------------------------------
+      # 14. Загружаем DMG как artifact
+      # ---------------------------------------------------------
       - name: Upload DMG
         uses: actions/upload-artifact@v4
         with:
-          name: SleepGuard-macOS-${{ matrix.arch_name }}
-          path: build/SleepGuard-${{ matrix.arch_name }}.dmg
+          name: Slyyypy-macOS
+          path: Slyyypy-macOS.dmg
           if-no-files-found: error
-          retention-days: 14
-
-      - name: Upload app bundle
-        uses: actions/upload-artifact@v4
-        with:
-          name: SleepGuard-macOS-app-${{ matrix.arch_name }}
-          path: build/SleepGuard.app
-          if-no-files-found: error
-          retention-days: 14
+```
